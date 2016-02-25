@@ -35,6 +35,7 @@ import (
 	"k8s.io/contrib/mungegithub/github"
 	"k8s.io/contrib/mungegithub/mungers/e2e"
 	fake_e2e "k8s.io/contrib/mungegithub/mungers/e2e/fake"
+	mungeutil "k8s.io/contrib/mungegithub/util"
 	"k8s.io/contrib/test-utils/utils"
 
 	"github.com/NYTimes/gziphandler"
@@ -297,6 +298,9 @@ func (sq *SubmitQueue) Initialize(config *github.Config, features *features.Feat
 
 // internalInitialize will initialize the munger for the given GCS bucket url.
 func (sq *SubmitQueue) internalInitialize(config *github.Config, features *features.Features, GCSBucketUrl string) error {
+	sq.JenkinsJobs = mungeutil.NormalizeStringSlice(sq.JenkinsJobs)
+	sq.RequiredStatusContexts = mungeutil.NormalizeStringSlice(sq.RequiredStatusContexts)
+
 	sq.Lock()
 	defer sq.Unlock()
 

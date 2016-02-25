@@ -26,6 +26,7 @@ import (
 	github_util "k8s.io/contrib/mungegithub/github"
 	"k8s.io/contrib/mungegithub/mungers"
 	"k8s.io/contrib/mungegithub/reports"
+	mungeutil "k8s.io/contrib/mungegithub/util"
 	utilflag "k8s.io/kubernetes/pkg/util/flag"
 
 	"github.com/golang/glog"
@@ -86,6 +87,9 @@ func main() {
 		Use:   filepath.Base(os.Args[0]),
 		Short: "A program to add labels, check tests, and generally mess with outstanding PRs",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			config.PRMungersList = mungeutil.NormalizeStringSlice(config.PRMungersList)
+			config.IssueReportsList = mungeutil.NormalizeStringSlice(config.IssueReportsList)
+
 			if err := config.PreExecute(); err != nil {
 				return err
 			}
