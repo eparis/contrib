@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/sets"
 
 	"k8s.io/contrib/mungegithub/features"
@@ -94,14 +95,16 @@ type submitQueueStatus struct {
 	PRStatus map[string]submitStatus
 }
 
-// Call updateHealth on the SubmitQueue at roughly constant intervals to keep
-// this up to date. The mergeable fraction of time for the queue as a whole
+// Call sq.updateHealth at roughly constant intervals to keep e2e info
+// up to date. The mergeable fraction of time for the queue as a whole
 // and the individual jobs will then be NumStable[PerJob] / TotalLoops.
 type submitQueueHealth struct {
 	StartTime       time.Time
 	TotalLoops      int
 	NumStable       int
 	NumStablePerJob map[string]int
+
+	LastMergeTime time.Time
 }
 
 // SubmitQueue will merge PR which meet a set of requirements.
@@ -141,7 +144,8 @@ type SubmitQueue struct {
 	userInfo      map[string]userInfo     //proteted by sync.Mutex
 	statusHistory []submitStatus          // protected by sync.Mutex
 
-	// Every time a PR is added to githubE2EQueue also notify the channel
+	clock util.Clock
+
 	githubE2ERunning  *github.MungeObject         // protect by sync.Mutex!
 	githubE2EQueue    map[int]*github.MungeObject // protected by sync.Mutex!
 	githubE2EPollTime time.Duration
@@ -176,7 +180,6 @@ func (sq *SubmitQueue) internalInitialize(config *github.Config, features *featu
 		glog.Fatalf("--jenkins-host is required.")
 	}
 
-	sq.lastE2EStable = true
 	if sq.FakeE2E {
 		sq.e2e = &fake_e2e.FakeE2ETester{
 			JobNames:           sq.JobNames,
@@ -208,16 +211,21 @@ func (sq *SubmitQueue) internalInitialize(config *github.Config, features *featu
 		go http.ListenAndServe(config.Address, nil)
 	}
 
-	sq.prStatus = map[string]submitStatus{}
-	sq.lastPRStatus = map[string]submitStatus{}
-
-	sq.githubE2EQueue = map[int]*github.MungeObject{}
 	if sq.githubE2EPollTime == 0 {
 		sq.githubE2EPollTime = githubE2EPollTime
 	}
 
-	sq.health.StartTime = time.Now()
+	sq.clock = util.RealClock{}
+
+	now := sq.clock.Now()
+	sq.health.StartTime = now
 	sq.health.NumStablePerJob = map[string]int{}
+	sq.health.LastMergeTime = now
+
+	sq.lastE2EStable = true
+	sq.prStatus = map[string]submitStatus{}
+	sq.lastPRStatus = map[string]submitStatus{}
+	sq.githubE2EQueue = map[int]*github.MungeObject{}
 
 	go sq.handleGithubE2EAndMerge()
 	go sq.updateGoogleE2ELoop()
@@ -319,7 +327,7 @@ func (sq *SubmitQueue) e2eStable() bool {
 	}
 	if reason != "" {
 		submitStatus := submitStatus{
-			Time: time.Now(),
+			Time: sq.clock.Now(),
 			statusPullRequest: statusPullRequest{
 				Title:     reason,
 				AvatarURL: avatar,
@@ -418,7 +426,7 @@ func reasonToState(reason string) string {
 func (sq *SubmitQueue) SetMergeStatus(obj *github.MungeObject, reason string) {
 	glog.V(4).Infof("SubmitQueue not merging %d because %q", *obj.Issue.Number, reason)
 	submitStatus := submitStatus{
-		Time:              time.Now(),
+		Time:              sq.clock.Now(),
 		statusPullRequest: *objToStatusPullRequest(obj),
 		Reason:            reason,
 	}
@@ -855,6 +863,7 @@ func (sq *SubmitQueue) doGithubE2EAndMerge(obj *github.MungeObject) {
 	}
 
 	obj.MergePR("submit-queue")
+	sq.health.LastMergeTime = sq.clock.Now()
 	sq.SetMergeStatus(obj, merged)
 	return
 }
@@ -951,6 +960,7 @@ func (sq *SubmitQueue) servePriorityInfo(res http.ResponseWriter, req *http.Requ
       <li>Determined by a label of the form 'priority/pX'
       <li>P0 -&gt; P1 -&gt; P2</li>
       <li>A PR with no priority label is considered equal to a P3</li>
+      <li>A PR with the 'e2e-not-required' label will come first, before even P0</li>
     </ul>
   </li>
   <li>Release milestone due date

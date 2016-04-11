@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/kubernetes/pkg/util"
+
 	github_util "k8s.io/contrib/mungegithub/github"
 	github_test "k8s.io/contrib/mungegithub/github/testing"
 	"k8s.io/contrib/mungegithub/mungers/jenkins"
@@ -174,6 +176,12 @@ func getTestSQ(startThreads bool, config *github_util.Config, server *httptest.S
 	sq.WhitelistOverride = "ok-to-merge"
 	sq.githubE2EQueue = map[int]*github_util.MungeObject{}
 	sq.githubE2EPollTime = 50 * time.Millisecond
+
+	clock := util.NewFakeClock(time.Time{})
+	sq.clock = clock
+	now := clock.Now()
+	sq.health.StartTime = now
+	sq.health.LastMergeTime = now
 	if startThreads {
 		sq.internalInitialize(config, nil, server.URL)
 		sq.EachLoop()

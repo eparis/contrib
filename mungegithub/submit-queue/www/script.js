@@ -1,5 +1,5 @@
 "use strict";
-angular.module('SubmitQueueModule', ['ngMaterial', 'md.data.table', 'angular-toArrayFilter']);
+angular.module('SubmitQueueModule', ['ngMaterial', 'md.data.table', 'angular-toArrayFilter', 'angularMoment']);
 
 angular.module('SubmitQueueModule').controller('SQCntl', ['DataService', '$interval', '$location', SQCntl]);
 
@@ -16,7 +16,6 @@ function SQCntl(dataService, $interval, $location) {
   self.queryNum = 0;
   self.selected = 0;
   self.OverallHealth = "";
-  self.StartTime = "";
   self.StatOrder = "-Count";
   self.location = $location;
 
@@ -93,10 +92,10 @@ function SQCntl(dataService, $interval, $location) {
   }
 
   // Refresh every 10 minutes
-  refreshStats();
-  $interval(refreshStats, 600000);
+  refreshBotStats();
+  $interval(refreshBotStats, 600000);
 
-  function refreshStats() {
+  function refreshBotStats() {
     dataService.getData('stats').then(function successCallback(response) {
       var nextLoop = new Date(response.data.NextLoopTime);
       document.getElementById("next-run-time").innerHTML = nextLoop.toLocaleTimeString();
@@ -131,7 +130,6 @@ function SQCntl(dataService, $interval, $location) {
       if (self.health.TotalLoops !== 0) {
         var percentStable = self.health.NumStable * 100.0 / self.health.TotalLoops;
         self.OverallHealth = Math.round(percentStable) + "%";
-        self.StartTime = new Date(self.health.StartTime).toLocaleString();
       }
     });
   }
