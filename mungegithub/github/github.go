@@ -592,6 +592,10 @@ func (config *Config) NewIssue(title, body string, labels []string, owner string
 	if owner != "" {
 		assignee = &owner
 	}
+	if len(body) > maxCommentLen {
+		glog.Info("Issue being created was larger than %d and was truncated: %q", maxCommentLen, title)
+		body = body[:maxCommentLen]
+	}
 	issue, _, err := config.client.Issues.Create(config.Org, config.Project, &github.IssueRequest{
 		Title:    &title,
 		Body:     &body,
