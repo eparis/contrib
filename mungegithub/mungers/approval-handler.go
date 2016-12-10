@@ -70,17 +70,6 @@ func (*ApprovalHandler) EachLoop() error { return nil }
 func (*ApprovalHandler) AddFlags(cmd *cobra.Command, config *github.Config) {}
 
 // Munge is the workhorse the will actually make updates to the PR
-// The algorithm goes as:
-// - Initially, we build an approverSet
-//   - Go through all comments after latest commit.
-//	- If anyone said "/approve", add them to approverSet.
-// - Then, for each file, we see if any approver of this file is in approverSet and keep track of files without approval
-//   - An approver of a file is defined as:
-//     - Someone listed as an "approver" in an OWNERS file in the files directory OR
-//     - in one of the file's parent directorie
-// - Iff all files have been approved, the bot will add the "approved" label.
-// - Iff a cancel command is found, that reviewer will be removed from the approverSet
-// 	and the munger will remove the approved label if it has been applied
 func (h *ApprovalHandler) Munge(obj *github.MungeObject) {
 	if !obj.IsPR() {
 		return
@@ -97,7 +86,13 @@ func (h *ApprovalHandler) Munge(obj *github.MungeObject) {
 		return
 	}
 
-	ownersMap := h.getApprovedOwners(files, createApproverSet(comments))
+	// Go through all comments after latest commit.
+	//  If anyone said "/approve", add them to approverSet.
+	//  If anyone said "/approve cancel", remove them
+	approverSet := createApproverSet(comments)
+
+	// map from OWNERS pathnames to a set of users who approved at that level.
+	ownersMap := h.getApprovedOwners(files, approverSet)
 
 	if err := h.updateNotification(obj, ownersMap); err != nil {
 		return
@@ -118,27 +113,37 @@ func (h *ApprovalHandler) Munge(obj *github.MungeObject) {
 }
 
 func (h *ApprovalHandler) updateNotification(obj *github.MungeObject, ownersMap map[string]sets.String) error {
-	notificationMatcher := c.MungerNotificationName(approvalNotificationName)
 	comments, err := obj.ListComments()
 	if err != nil {
-		glog.Error("Could not list the comments for PR%v", obj.Issue.Number)
 		return err
 	}
+
+	notificationMatcher := c.MungerNotificationName(approvalNotificationName)
 	notifications := c.FilterComments(comments, notificationMatcher)
 	latestNotification := notifications.GetLast()
 	if latestNotification == nil {
 		return h.createMessage(obj, ownersMap)
 	}
-	latestApprove := c.FilterComments(comments, c.CommandName(approveCommand)).GetLast()
+
+	approveMatcher := c.CommandName(approveCommand)
+	approveComments := c.FilterComments(comments, approveMatcher)
+	latestApprove := approveComments.GetLast()
 	if latestApprove == nil {
 		// there was already a bot notification and nothing has changed since
 		return nil
 	}
+
+	if latestApprove.CreatedAt == nil || latestNotification.CreatedAt == nil {
+		// API gave us crap, nothing we can do
+		return nil
+	}
+
 	if latestApprove.CreatedAt.After(*latestNotification.CreatedAt) {
 		// there has been approval since last notification
 		obj.DeleteComment(latestNotification)
 		return h.createMessage(obj, ownersMap)
 	}
+
 	lastModified := obj.LastModifiedTime()
 	if latestNotification.CreatedAt.Before(*lastModified) {
 		obj.DeleteComment(latestNotification)
@@ -153,14 +158,13 @@ func (h *ApprovalHandler) updateNotification(obj *github.MungeObject, ownersMap 
 func (h ApprovalHandler) findApproverSet(ownersPath sets.String) sets.String {
 
 	// approverCount contains a map: person -> set of relevant OWNERS file they are in
-	approverCount := make(map[string]sets.String)
+	approverCount := map[string]sets.String{}
 	for ownersFile := range ownersPath {
 		for approver := range h.features.Repos.LeafApprovers(ownersFile) {
-			if _, ok := approverCount[approver]; ok {
-				approverCount[approver].Insert(ownersFile)
-			} else {
-				approverCount[approver] = sets.NewString(ownersFile)
+			if _, ok := approverCount[approver]; !ok {
+				approverCount[approver] = sets.NewString()
 			}
+			approverCount[approver].Insert(ownersFile)
 		}
 	}
 
@@ -174,31 +178,33 @@ func (h ApprovalHandler) findApproverSet(ownersPath sets.String) sets.String {
 		maxCovered := 0
 		var bestPerson string
 		for k, v := range approverCount {
-			if v.Intersection(copyOfFiles).Len() > maxCovered {
+			covered := v.Intersection(copyOfFiles)
+			if covered.Len() > maxCovered {
 				maxCovered = len(v)
 				bestPerson = k
 			}
 		}
 
 		approverGroup.Insert(bestPerson)
-		copyOfFiles.Delete(approverCount[bestPerson].List()...)
+		coveredFiles := approverCount[bestPerson]
+		copyOfFiles.Delete(coveredFiles.List()...)
 	}
 	return approverGroup
 }
 
 func (h *ApprovalHandler) createMessage(obj *github.MungeObject, ownersMap map[string]sets.String) error {
 	// sort the keys so we always display OWNERS files in same order
-	sliceOfKeys := make([]string, len(ownersMap))
+	OWNERSFiles := make([]string, len(ownersMap))
 	i := 0
 	for path := range ownersMap {
-		sliceOfKeys[i] = path
+		OWNERSFiles[i] = path
 		i++
 	}
-	sort.Strings(sliceOfKeys)
+	sort.Strings(OWNERSFiles)
 
 	unapprovedOwners := sets.NewString()
 	context := bytes.NewBufferString("")
-	for _, path := range sliceOfKeys {
+	for _, path := range OWNERSFiles {
 		approverSet := ownersMap[path]
 		if approverSet.Len() == 0 {
 			context.WriteString(fmt.Sprintf("- **%s**\n", path))
@@ -218,7 +224,13 @@ func (h *ApprovalHandler) createMessage(obj *github.MungeObject, ownersMap map[s
 	}
 	context.WriteString("\n You can indicate your approval by writing `/approve` in a comment")
 	context.WriteString("\n You can cancel your approval by writing `/approve cancel`in a comment")
-	return c.Notification{approvalNotificationName, "The Following OWNERS Files Need Approval:\n", context.String()}.Post(obj)
+
+	notification := c.Notification{
+		Name:      approvalNotificationName,
+		Arguments: "The Following OWNERS Files Need Approval:\n",
+		Context:   context.String(),
+	}
+	return notification.Post(obj)
 }
 
 // createApproverSet iterates through the list of comments on a PR
@@ -242,11 +254,33 @@ func createApproverSet(comments []*githubapi.IssueComment) sets.String {
 
 // getApprovedOwners finds all the relevant OWNERS files for the PRs and identifies all the people from them
 // that have approved the PR
+//
+// ex:
+// approverSet contains "rootApprover", "pkgApprover", and "randomGuy"
+// /OWNERS contains "rootApprover"
+// /pkg/OWNERS contains "pkgApprover"
+// The files /pkg/file.go and /api/file.go have been changed.
+//
+// This will return:
+// map[string]sets.String {
+//	"/":     [rootApprover]
+//	"/pkg/": [rootApprover, pkgApprover]
+// }
 func (h ApprovalHandler) getApprovedOwners(files []*githubapi.CommitFile, approverSet sets.String) map[string]sets.String {
-	ownersApprovers := make(map[string]sets.String)
+	ownersApprovers := map[string]sets.String{}
 	for _, file := range files {
-		fileOwners := h.features.Repos.Approvers(*file.Filename)
-		ownersApprovers[h.features.Repos.FindOwnersForPath(*file.Filename)] = fileOwners.Intersection(approverSet)
+		filename := *file.Filename
+
+		OWNERSFilename := h.features.Repos.OWNERSPathForFile(filename)
+		if _, ok := ownersApprovers[OWNERSFilename]; ok {
+			// something else already figure it out
+			continue
+		}
+
+		fileApprovers := h.features.Repos.Approvers(filename)
+		fileApprovers = fileApprovers.Intersection(approverSet)
+
+		ownersApprovers[OWNERSFilename] = fileApprovers
 	}
 	return ownersApprovers
 }

@@ -257,8 +257,8 @@ func (o *RepoInfo) gitCommandDir(args []string, cmdDir string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// FindOwnersForPath returns the OWNERS file further down the tree for a file
-func (o *RepoInfo) FindOwnersForPath(path string) string {
+// OWNERSPathForFile returns the OWNERS file further down the tree for a file
+func (o *RepoInfo) OWNERSPathForFile(path string) string {
 	d := path
 
 	for {
